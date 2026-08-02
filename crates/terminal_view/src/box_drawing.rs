@@ -24,7 +24,7 @@ enum Stroke {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-struct BoxDrawingGlyph {
+struct LineGlyph {
     left: Option<Stroke>,
     right: Option<Stroke>,
     up: Option<Stroke>,
@@ -32,7 +32,76 @@ struct BoxDrawingGlyph {
     rounded: bool,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Axis {
+    Horizontal,
+    Vertical,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct DashedGlyph {
+    axis: Axis,
+    gaps: i32,
+    stroke: Stroke,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct DiagonalGlyph {
+    rising: bool,
+    falling: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BoxDrawingGlyph {
+    Line(LineGlyph),
+    Dashed(DashedGlyph),
+    Double(char),
+    Diagonal(DiagonalGlyph),
+}
+
 fn glyph_for(ch: char) -> Option<BoxDrawingGlyph> {
+    use Axis::{Horizontal, Vertical};
+    use Stroke::{Heavy, Light};
+
+    let dashed = match ch {
+        '\u{2504}' => Some((Horizontal, 2, Light)),
+        '\u{2505}' => Some((Horizontal, 2, Heavy)),
+        '\u{2506}' => Some((Vertical, 2, Light)),
+        '\u{2507}' => Some((Vertical, 2, Heavy)),
+        '\u{2508}' => Some((Horizontal, 3, Light)),
+        '\u{2509}' => Some((Horizontal, 3, Heavy)),
+        '\u{250a}' => Some((Vertical, 3, Light)),
+        '\u{250b}' => Some((Vertical, 3, Heavy)),
+        '\u{254c}' => Some((Horizontal, 1, Light)),
+        '\u{254d}' => Some((Horizontal, 1, Heavy)),
+        '\u{254e}' => Some((Vertical, 1, Light)),
+        '\u{254f}' => Some((Vertical, 1, Heavy)),
+        _ => None,
+    };
+    if let Some((axis, gaps, stroke)) = dashed {
+        return Some(BoxDrawingGlyph::Dashed(DashedGlyph { axis, gaps, stroke }));
+    }
+
+    let glyph = match ch {
+        '\u{2550}'..='\u{256c}' => BoxDrawingGlyph::Double(ch),
+        '\u{2571}' => BoxDrawingGlyph::Diagonal(DiagonalGlyph {
+            rising: true,
+            falling: false,
+        }),
+        '\u{2572}' => BoxDrawingGlyph::Diagonal(DiagonalGlyph {
+            rising: false,
+            falling: true,
+        }),
+        '\u{2573}' => BoxDrawingGlyph::Diagonal(DiagonalGlyph {
+            rising: true,
+            falling: true,
+        }),
+        _ => BoxDrawingGlyph::Line(line_glyph_for(ch)?),
+    };
+    Some(glyph)
+}
+
+fn line_glyph_for(ch: char) -> Option<LineGlyph> {
     if !matches!(
         ch,
         '\u{2500}'..='\u{2503}'
@@ -99,7 +168,7 @@ fn glyph_for(ch: char) -> Option<BoxDrawingGlyph> {
         _ => None,
     };
 
-    Some(BoxDrawingGlyph {
+    Some(LineGlyph {
         left,
         right,
         up,
@@ -120,7 +189,7 @@ fn centered_stroke_bounds(dimension: i32, stroke: Option<Stroke>, light_stroke: 
 }
 
 fn for_each_straight_rect(
-    glyph: BoxDrawingGlyph,
+    glyph: LineGlyph,
     cell: Size<i32>,
     light_stroke: i32,
     mut emit: impl FnMut(Bounds<i32>),
@@ -195,6 +264,292 @@ fn for_each_straight_rect(
     }
 }
 
+fn for_each_dashed_rect(
+    glyph: DashedGlyph,
+    cell: Size<i32>,
+    light_stroke: i32,
+    mut emit: impl FnMut(Bounds<i32>),
+) {
+    let (dimension, cross_dimension) = match glyph.axis {
+        Axis::Horizontal => (cell.width, cell.height),
+        Axis::Vertical => (cell.height, cell.width),
+    };
+    let gap_length = (dimension / 8).max(1);
+    let dash_length = (dimension.saturating_sub(gap_length * glyph.gaps) / (glyph.gaps + 1)).max(1);
+    let cross_bounds = centered_stroke_bounds(cross_dimension, Some(glyph.stroke), light_stroke);
+
+    for segment in 0..=glyph.gaps {
+        let start = (segment * (dash_length + gap_length)).min(dimension);
+        let end = (start + dash_length).min(dimension);
+        if start >= end || cross_bounds.0 >= cross_bounds.1 {
+            continue;
+        }
+        let bounds = match glyph.axis {
+            Axis::Horizontal => {
+                Bounds::from_corners(point(start, cross_bounds.0), point(end, cross_bounds.1))
+            }
+            Axis::Vertical => {
+                Bounds::from_corners(point(cross_bounds.0, start), point(cross_bounds.1, end))
+            }
+        };
+        emit(bounds);
+    }
+}
+
+fn stroke_bounds_at(dimension: i32, center: f32, thickness: i32) -> (i32, i32) {
+    let thickness = thickness.min(dimension);
+    let start = ((center - thickness as f32 / 2.) as i32).max(0);
+    let end = ((center + thickness as f32 / 2.) as i32).min(dimension);
+    (start, end)
+}
+
+fn horizontal_rect(
+    cell: Size<i32>,
+    start: f32,
+    end: f32,
+    center: f32,
+    thickness: i32,
+) -> Option<Bounds<i32>> {
+    let (top, bottom) = stroke_bounds_at(cell.height, center, thickness);
+    let left = (start as i32).clamp(0, cell.width);
+    let right = (end as i32).clamp(0, cell.width);
+    (left < right && top < bottom)
+        .then(|| Bounds::from_corners(point(left, top), point(right, bottom)))
+}
+
+fn vertical_rect(
+    cell: Size<i32>,
+    start: f32,
+    end: f32,
+    center: f32,
+    thickness: i32,
+) -> Option<Bounds<i32>> {
+    let (left, right) = stroke_bounds_at(cell.width, center, thickness);
+    let top = (start as i32).clamp(0, cell.height);
+    let bottom = (end as i32).clamp(0, cell.height);
+    (left < right && top < bottom)
+        .then(|| Bounds::from_corners(point(left, top), point(right, bottom)))
+}
+
+// Avoid blending translucent terminal colors more than once where double-line rails overlap.
+fn emit_uncovered_rect(
+    rect: Bounds<i32>,
+    covered: &[Option<Bounds<i32>>],
+    emit: &mut impl FnMut(Bounds<i32>),
+) {
+    let Some((covered_rect, remaining)) = covered.split_first() else {
+        emit(rect);
+        return;
+    };
+    let Some(covered_rect) = covered_rect else {
+        emit_uncovered_rect(rect, remaining, emit);
+        return;
+    };
+    let intersection = rect.intersect(covered_rect);
+    if intersection.is_empty() {
+        emit_uncovered_rect(rect, remaining, emit);
+        return;
+    }
+
+    let pieces = [
+        (rect.left(), rect.top(), rect.right(), intersection.top()),
+        (
+            rect.left(),
+            intersection.bottom(),
+            rect.right(),
+            rect.bottom(),
+        ),
+        (
+            rect.left(),
+            intersection.top(),
+            intersection.left(),
+            intersection.bottom(),
+        ),
+        (
+            intersection.right(),
+            intersection.top(),
+            rect.right(),
+            intersection.bottom(),
+        ),
+    ];
+    for (left, top, right, bottom) in pieces {
+        if left < right && top < bottom {
+            emit_uncovered_rect(
+                Bounds::from_corners(point(left, top), point(right, bottom)),
+                remaining,
+                emit,
+            );
+        }
+    }
+}
+
+fn for_each_double_rect(
+    character: char,
+    cell: Size<i32>,
+    light_stroke: i32,
+    mut emit: impl FnMut(Bounds<i32>),
+) {
+    let center_x = cell.width as f32 / 2.;
+    let center_y = cell.height as f32 / 2.;
+    let vertical_lines = if matches!(
+        character,
+        '\u{2552}'
+            | '\u{2555}'
+            | '\u{2558}'
+            | '\u{255b}'
+            | '\u{255e}'
+            | '\u{2561}'
+            | '\u{2564}'
+            | '\u{2567}'
+            | '\u{256a}'
+    ) {
+        (center_x, center_x)
+    } else {
+        let bounds = centered_stroke_bounds(cell.width, Some(Stroke::Light), light_stroke);
+        (
+            (bounds.0 - 1).max(0) as f32,
+            (bounds.1 + 1).min(cell.width) as f32,
+        )
+    };
+    let horizontal_lines = if matches!(
+        character,
+        '\u{2553}'
+            | '\u{2556}'
+            | '\u{2559}'
+            | '\u{255c}'
+            | '\u{255f}'
+            | '\u{2562}'
+            | '\u{2565}'
+            | '\u{2568}'
+            | '\u{256b}'
+    ) {
+        (center_y, center_y)
+    } else {
+        let bounds = centered_stroke_bounds(cell.height, Some(Stroke::Light), light_stroke);
+        (
+            (bounds.0 - 1).max(0) as f32,
+            (bounds.1 + 1).min(cell.height) as f32,
+        )
+    };
+
+    let vertical_left_bounds = stroke_bounds_at(cell.width, vertical_lines.0, light_stroke);
+    let vertical_right_bounds = stroke_bounds_at(cell.width, vertical_lines.1, light_stroke);
+    let horizontal_top_bounds = stroke_bounds_at(cell.height, horizontal_lines.0, light_stroke);
+    let horizontal_bottom_bounds = stroke_bounds_at(cell.height, horizontal_lines.1, light_stroke);
+
+    let (top_left_end, bottom_left_end) = match character {
+        '\u{2550}' | '\u{256b}' => (center_x, center_x),
+        '\u{2555}'..='\u{2557}' => (
+            vertical_right_bounds.1 as f32,
+            vertical_left_bounds.1 as f32,
+        ),
+        '\u{255b}'..='\u{255d}' => (
+            vertical_left_bounds.1 as f32,
+            vertical_right_bounds.1 as f32,
+        ),
+        '\u{2561}'..='\u{2563}' | '\u{256a}' | '\u{256c}' => {
+            (vertical_left_bounds.1 as f32, vertical_left_bounds.1 as f32)
+        }
+        '\u{2564}'..='\u{2568}' => (center_x, vertical_left_bounds.1 as f32),
+        '\u{2569}' => (vertical_left_bounds.1 as f32, center_x),
+        _ => (0., 0.),
+    };
+    let (top_right_start, bottom_right_start) = match character {
+        '\u{2550}' | '\u{2565}' | '\u{256b}' => (center_x, center_x),
+        '\u{2552}'..='\u{2554}' | '\u{2568}' => (
+            vertical_left_bounds.0 as f32,
+            vertical_right_bounds.0 as f32,
+        ),
+        '\u{2558}'..='\u{255a}' => (
+            vertical_right_bounds.0 as f32,
+            vertical_left_bounds.0 as f32,
+        ),
+        '\u{255e}'..='\u{2560}' | '\u{256a}' | '\u{256c}' => (
+            vertical_right_bounds.0 as f32,
+            vertical_right_bounds.0 as f32,
+        ),
+        '\u{2564}' | '\u{2566}' => (center_x, vertical_right_bounds.0 as f32),
+        '\u{2567}' | '\u{2569}' => (vertical_right_bounds.0 as f32, center_x),
+        _ => (cell.width as f32, cell.width as f32),
+    };
+    let (left_top_end, right_top_end) = match character {
+        '\u{2551}' | '\u{256a}' => (center_y, center_y),
+        '\u{2558}'..='\u{255c}' | '\u{2568}' => (
+            horizontal_bottom_bounds.1 as f32,
+            horizontal_top_bounds.1 as f32,
+        ),
+        '\u{255d}' => (
+            horizontal_top_bounds.1 as f32,
+            horizontal_bottom_bounds.1 as f32,
+        ),
+        '\u{255e}'..='\u{2560}' => (center_y, horizontal_top_bounds.1 as f32),
+        '\u{2561}'..='\u{2563}' => (horizontal_top_bounds.1 as f32, center_y),
+        '\u{2567}' | '\u{2569}' | '\u{256b}' | '\u{256c}' => (
+            horizontal_top_bounds.1 as f32,
+            horizontal_top_bounds.1 as f32,
+        ),
+        _ => (0., 0.),
+    };
+    let (left_bottom_start, right_bottom_start) = match character {
+        '\u{2551}' | '\u{256a}' => (center_y, center_y),
+        '\u{2552}'..='\u{2554}' => (
+            horizontal_top_bounds.0 as f32,
+            horizontal_bottom_bounds.0 as f32,
+        ),
+        '\u{2555}'..='\u{2557}' => (
+            horizontal_bottom_bounds.0 as f32,
+            horizontal_top_bounds.0 as f32,
+        ),
+        '\u{255e}'..='\u{2560}' => (center_y, horizontal_bottom_bounds.0 as f32),
+        '\u{2561}'..='\u{2563}' => (horizontal_bottom_bounds.0 as f32, center_y),
+        '\u{2564}'..='\u{2566}' | '\u{256b}' | '\u{256c}' => (
+            horizontal_bottom_bounds.0 as f32,
+            horizontal_bottom_bounds.0 as f32,
+        ),
+        _ => (cell.height as f32, cell.height as f32),
+    };
+
+    let rects = [
+        horizontal_rect(cell, 0., top_left_end, horizontal_lines.0, light_stroke),
+        horizontal_rect(cell, 0., bottom_left_end, horizontal_lines.1, light_stroke),
+        horizontal_rect(
+            cell,
+            top_right_start,
+            cell.width as f32,
+            horizontal_lines.0,
+            light_stroke,
+        ),
+        horizontal_rect(
+            cell,
+            bottom_right_start,
+            cell.width as f32,
+            horizontal_lines.1,
+            light_stroke,
+        ),
+        vertical_rect(cell, 0., left_top_end, vertical_lines.0, light_stroke),
+        vertical_rect(cell, 0., right_top_end, vertical_lines.1, light_stroke),
+        vertical_rect(
+            cell,
+            left_bottom_start,
+            cell.height as f32,
+            vertical_lines.0,
+            light_stroke,
+        ),
+        vertical_rect(
+            cell,
+            right_bottom_start,
+            cell.height as f32,
+            vertical_lines.1,
+            light_stroke,
+        ),
+    ];
+    for (index, rect) in rects.iter().enumerate() {
+        if let Some(rect) = rect {
+            emit_uncovered_rect(*rect, &rects[..index], &mut emit);
+        }
+    }
+}
+
 #[derive(Debug)]
 struct RoundedGeometry {
     arc_start: Point<f32>,
@@ -204,7 +559,7 @@ struct RoundedGeometry {
 }
 
 fn rounded_geometry(
-    glyph: BoxDrawingGlyph,
+    glyph: LineGlyph,
     cell: Size<i32>,
     light_stroke: i32,
     mut emit: impl FnMut(Bounds<i32>),
@@ -311,6 +666,45 @@ fn paint_rect(
     window.paint_quad(fill(bounds, color));
 }
 
+fn for_each_diagonal_segment(
+    glyph: DiagonalGlyph,
+    cell: Size<i32>,
+    mut emit: impl FnMut(Point<i32>, Point<i32>),
+) {
+    if glyph.rising {
+        emit(point(0, cell.height), point(cell.width, 0));
+    }
+    if glyph.falling {
+        emit(point(0, 0), point(cell.width, cell.height));
+    }
+}
+
+fn paint_diagonal(
+    glyph: DiagonalGlyph,
+    cell: Size<i32>,
+    cell_left: i32,
+    cell_top: i32,
+    scale_factor: f32,
+    light_stroke: i32,
+    color: Hsla,
+    window: &mut Window,
+) {
+    let to_pixels = |position: Point<i32>| {
+        point(
+            px((cell_left + position.x) as f32 / scale_factor),
+            px((cell_top + position.y) as f32 / scale_factor),
+        )
+    };
+    let mut builder = PathBuilder::stroke(px(light_stroke as f32 / scale_factor));
+    for_each_diagonal_segment(glyph, cell, |start, end| {
+        builder.move_to(to_pixels(start));
+        builder.line_to(to_pixels(end));
+    });
+    if let Some(path) = builder.build().log_err() {
+        window.paint_path(path, color);
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct BoxDrawingLayoutGlyph {
     point: LayoutPoint,
@@ -375,34 +769,58 @@ impl BoxDrawingLayoutGlyph {
             return;
         }
 
-        if let Some(geometry) = rounded_geometry(self.glyph, cell, light_stroke, |stub| {
-            paint_rect(stub, cell_left, cell_top, scale_factor, self.color, window);
-        }) {
-            let to_pixels = |position: Point<f32>| {
-                point(
-                    px((cell_left as f32 + position.x) / scale_factor),
-                    px((cell_top as f32 + position.y) / scale_factor),
-                )
-            };
-            let mut builder = PathBuilder::stroke(px(light_stroke as f32 / scale_factor));
-            builder.move_to(to_pixels(geometry.arc_start));
-            builder.arc_to(
-                point(
-                    px(geometry.radius / scale_factor),
-                    px(geometry.radius / scale_factor),
-                ),
-                px(0.),
-                false,
-                geometry.sweep,
-                to_pixels(geometry.arc_end),
-            );
-            if let Some(path) = builder.build().log_err() {
-                window.paint_path(path, self.color);
+        match self.glyph {
+            BoxDrawingGlyph::Line(glyph) => {
+                if let Some(geometry) = rounded_geometry(glyph, cell, light_stroke, |stub| {
+                    paint_rect(stub, cell_left, cell_top, scale_factor, self.color, window);
+                }) {
+                    let to_pixels = |position: Point<f32>| {
+                        point(
+                            px((cell_left as f32 + position.x) / scale_factor),
+                            px((cell_top as f32 + position.y) / scale_factor),
+                        )
+                    };
+                    let mut builder = PathBuilder::stroke(px(light_stroke as f32 / scale_factor));
+                    builder.move_to(to_pixels(geometry.arc_start));
+                    builder.arc_to(
+                        point(
+                            px(geometry.radius / scale_factor),
+                            px(geometry.radius / scale_factor),
+                        ),
+                        px(0.),
+                        false,
+                        geometry.sweep,
+                        to_pixels(geometry.arc_end),
+                    );
+                    if let Some(path) = builder.build().log_err() {
+                        window.paint_path(path, self.color);
+                    }
+                } else {
+                    for_each_straight_rect(glyph, cell, light_stroke, |rect| {
+                        paint_rect(rect, cell_left, cell_top, scale_factor, self.color, window);
+                    });
+                }
             }
-        } else {
-            for_each_straight_rect(self.glyph, cell, light_stroke, |rect| {
-                paint_rect(rect, cell_left, cell_top, scale_factor, self.color, window);
-            });
+            BoxDrawingGlyph::Dashed(glyph) => {
+                for_each_dashed_rect(glyph, cell, light_stroke, |rect| {
+                    paint_rect(rect, cell_left, cell_top, scale_factor, self.color, window);
+                });
+            }
+            BoxDrawingGlyph::Double(character) => {
+                for_each_double_rect(character, cell, light_stroke, |rect| {
+                    paint_rect(rect, cell_left, cell_top, scale_factor, self.color, window);
+                });
+            }
+            BoxDrawingGlyph::Diagonal(glyph) => paint_diagonal(
+                glyph,
+                cell,
+                cell_left,
+                cell_top,
+                scale_factor,
+                light_stroke,
+                self.color,
+                window,
+            ),
         }
 
         let Some(decoration_metrics) = decoration_metrics else {
@@ -517,13 +935,34 @@ impl<'a> BoxDrawingPainter<'a> {
 mod tests {
     use super::*;
 
-    fn straight_rects(
-        glyph: BoxDrawingGlyph,
-        cell: Size<i32>,
-        light_stroke: i32,
-    ) -> Vec<Bounds<i32>> {
+    fn straight_rects(glyph: LineGlyph, cell: Size<i32>, light_stroke: i32) -> Vec<Bounds<i32>> {
         let mut rects = Vec::new();
         for_each_straight_rect(glyph, cell, light_stroke, |rect| rects.push(rect));
+        rects
+    }
+
+    fn line_glyph(character: char) -> LineGlyph {
+        let Some(BoxDrawingGlyph::Line(glyph)) = glyph_for(character) else {
+            panic!("{character} should be a line glyph");
+        };
+        glyph
+    }
+
+    fn dashed_rects(character: char, cell: Size<i32>, light_stroke: i32) -> Vec<Bounds<i32>> {
+        let Some(BoxDrawingGlyph::Dashed(glyph)) = glyph_for(character) else {
+            panic!("{character} should be a dashed glyph");
+        };
+        let mut rects = Vec::new();
+        for_each_dashed_rect(glyph, cell, light_stroke, |rect| rects.push(rect));
+        rects
+    }
+
+    fn double_rects(character: char, cell: Size<i32>, light_stroke: i32) -> Vec<Bounds<i32>> {
+        let Some(BoxDrawingGlyph::Double(character)) = glyph_for(character) else {
+            panic!("{character} should be a double-line glyph");
+        };
+        let mut rects = Vec::new();
+        for_each_double_rect(character, cell, light_stroke, |rect| rects.push(rect));
         rects
     }
 
@@ -544,6 +983,18 @@ mod tests {
         pixels
     }
 
+    fn run_count(pixels: impl IntoIterator<Item = bool>) -> usize {
+        let mut previous = false;
+        let mut count = 0;
+        for pixel in pixels {
+            if pixel && !previous {
+                count += 1;
+            }
+            previous = pixel;
+        }
+        count
+    }
+
     #[test]
     fn box_drawing_stroke_uses_font_metric_with_cell_width_fallback() {
         assert_eq!(box_drawing_stroke_width(px(0.8), px(16.)), px(0.8));
@@ -558,48 +1009,174 @@ mod tests {
 
         assert_eq!(
             glyph_for('─'),
-            Some(BoxDrawingGlyph {
+            Some(BoxDrawingGlyph::Line(LineGlyph {
                 left: Some(Light),
                 right: Some(Light),
                 ..Default::default()
-            })
+            }))
         );
         assert_eq!(
             glyph_for('┃'),
-            Some(BoxDrawingGlyph {
+            Some(BoxDrawingGlyph::Line(LineGlyph {
                 up: Some(Heavy),
                 down: Some(Heavy),
                 ..Default::default()
-            })
+            }))
         );
         assert_eq!(
             glyph_for('┞'),
-            Some(BoxDrawingGlyph {
+            Some(BoxDrawingGlyph::Line(LineGlyph {
                 right: Some(Light),
                 up: Some(Heavy),
                 down: Some(Light),
                 ..Default::default()
-            })
+            }))
         );
         assert_eq!(
             glyph_for('╿'),
-            Some(BoxDrawingGlyph {
+            Some(BoxDrawingGlyph::Line(LineGlyph {
                 up: Some(Heavy),
                 down: Some(Light),
                 ..Default::default()
-            })
+            }))
         );
         assert_eq!(
             glyph_for('╭'),
-            Some(BoxDrawingGlyph {
+            Some(BoxDrawingGlyph::Line(LineGlyph {
                 right: Some(Light),
                 down: Some(Light),
                 rounded: true,
                 ..Default::default()
-            })
+            }))
         );
-        for unsupported in ['┄', '═', '╱'] {
-            assert_eq!(glyph_for(unsupported), None);
+    }
+
+    #[test]
+    fn covers_every_box_drawing_character() {
+        let mut family_counts = [0; 4];
+        for codepoint in 0x2500..=0x257f {
+            let character = char::from_u32(codepoint).expect("valid box-drawing codepoint");
+            let glyph = glyph_for(character).unwrap_or_else(|| {
+                panic!("U+{codepoint:04X} {character} should be custom-painted")
+            });
+            family_counts[match glyph {
+                BoxDrawingGlyph::Line(_) => 0,
+                BoxDrawingGlyph::Dashed(_) => 1,
+                BoxDrawingGlyph::Double(_) => 2,
+                BoxDrawingGlyph::Diagonal(_) => 3,
+            }] += 1;
+        }
+        assert_eq!(family_counts, [84, 12, 29, 3]);
+
+        for character in ['\u{24ff}', '\u{2580}'] {
+            assert_eq!(glyph_for(character), None);
+        }
+    }
+
+    #[test]
+    fn dashed_lines_match_alacritty_segmentation() {
+        let cell = Size {
+            width: 16,
+            height: 24,
+        };
+        assert_eq!(
+            dashed_rects('┄', cell, 1),
+            [
+                Bounds::from_corners(point(0, 11), point(4, 12)),
+                Bounds::from_corners(point(6, 11), point(10, 12)),
+                Bounds::from_corners(point(12, 11), point(16, 12)),
+            ]
+        );
+        assert_eq!(
+            dashed_rects('╏', cell, 1),
+            [
+                Bounds::from_corners(point(7, 0), point(9, 10)),
+                Bounds::from_corners(point(7, 13), point(9, 23)),
+            ]
+        );
+
+        for cell in [
+            Size {
+                width: 9,
+                height: 23,
+            },
+            Size {
+                width: 10,
+                height: 24,
+            },
+        ] {
+            for light_stroke in 1..=3 {
+                for codepoint in (0x2504..=0x250b).chain(0x254c..=0x254f) {
+                    let character = char::from_u32(codepoint).expect("valid dashed codepoint");
+                    rasterize(&dashed_rects(character, cell, light_stroke), cell);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn diagonals_connect_opposite_cell_corners() {
+        let cell = Size {
+            width: 10,
+            height: 24,
+        };
+        for (character, expected) in [
+            ('╱', vec![(point(0, 24), point(10, 0))]),
+            ('╲', vec![(point(0, 0), point(10, 24))]),
+            (
+                '╳',
+                vec![(point(0, 24), point(10, 0)), (point(0, 0), point(10, 24))],
+            ),
+        ] {
+            let Some(BoxDrawingGlyph::Diagonal(glyph)) = glyph_for(character) else {
+                panic!("{character} should be a diagonal glyph");
+            };
+            let mut segments = Vec::new();
+            for_each_diagonal_segment(glyph, cell, |start, end| segments.push((start, end)));
+            assert_eq!(segments, expected, "segments for {character}");
+        }
+    }
+
+    #[test]
+    fn double_lines_have_expected_edge_rails() {
+        let cell = Size {
+            width: 12,
+            height: 24,
+        };
+        for (character, expected_runs) in [
+            ('═', [2, 2, 0, 0]),
+            ('║', [0, 0, 2, 2]),
+            ('╒', [0, 2, 0, 1]),
+            ('╬', [2, 2, 2, 2]),
+        ] {
+            let pixels = rasterize(&double_rects(character, cell, 1), cell);
+            let actual_runs = [
+                run_count(pixels.iter().map(|line| line[0])),
+                run_count(pixels.iter().map(|line| line[cell.width as usize - 1])),
+                run_count(pixels[0].iter().copied()),
+                run_count(pixels[cell.height as usize - 1].iter().copied()),
+            ];
+            assert_eq!(actual_runs, expected_runs, "edge rails for {character}");
+        }
+
+        for cell in [
+            Size {
+                width: 9,
+                height: 23,
+            },
+            Size {
+                width: 10,
+                height: 24,
+            },
+        ] {
+            for light_stroke in 1..=3 {
+                for codepoint in 0x2550..=0x256c {
+                    let character = char::from_u32(codepoint).expect("valid double-line codepoint");
+                    let rects = double_rects(character, cell, light_stroke);
+                    assert!(!rects.is_empty(), "geometry for {character}");
+                    rasterize(&rects, cell);
+                }
+            }
         }
     }
 
@@ -665,9 +1242,7 @@ mod tests {
                     .chain(0x2574..=0x257f)
                 {
                     let ch = char::from_u32(codepoint).expect("valid box drawing codepoint");
-                    let glyph = glyph_for(ch).unwrap_or_else(|| {
-                        panic!("U+{codepoint:04X} {ch} should be custom-painted")
-                    });
+                    let glyph = line_glyph(ch);
                     let pixels = rasterize(&straight_rects(glyph, cell, light_stroke), cell);
                     let case = format!(
                         "{ch} in a {}x{} cell with light stroke {light_stroke}",
@@ -737,14 +1312,8 @@ mod tests {
             width: 12,
             height: 24,
         };
-        let horizontal = rasterize(
-            &straight_rects(glyph_for('─').expect("light horizontal glyph"), cell, 2),
-            cell,
-        );
-        let vertical = rasterize(
-            &straight_rects(glyph_for('│').expect("light vertical glyph"), cell, 2),
-            cell,
-        );
+        let horizontal = rasterize(&straight_rects(line_glyph('─'), cell, 2), cell);
+        let vertical = rasterize(&straight_rects(line_glyph('│'), cell, 2), cell);
 
         assert_eq!(
             horizontal
@@ -775,7 +1344,7 @@ mod tests {
         ];
 
         for (ch, arc_start, arc_end, sweep) in cases {
-            let glyph = glyph_for(ch).expect("rounded box-drawing glyph");
+            let glyph = line_glyph(ch);
             let mut stubs = Vec::new();
             let geometry = rounded_geometry(glyph, cell, 1, |stub| stubs.push(stub))
                 .expect("rounded geometry");
