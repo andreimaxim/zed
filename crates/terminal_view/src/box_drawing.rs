@@ -9,6 +9,14 @@ use crate::terminal_element::LayoutPoint;
 
 const LIGHT_STROKE_DIVISOR: f32 = 8.;
 
+fn box_drawing_stroke_width(underline_thickness: Pixels, cell_width: Pixels) -> Pixels {
+    if underline_thickness.as_f32().is_finite() && underline_thickness > Pixels::ZERO {
+        underline_thickness
+    } else {
+        cell_width / LIGHT_STROKE_DIVISOR
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Stroke {
     Light,
@@ -344,6 +352,7 @@ impl BoxDrawingLayoutGlyph {
         &self,
         origin: Point<Pixels>,
         dimensions: &TerminalBounds,
+        light_stroke: i32,
         decoration_metrics: Option<DecorationMetrics>,
         window: &mut Window,
     ) {
@@ -366,9 +375,6 @@ impl BoxDrawingLayoutGlyph {
             return;
         }
 
-        let nominal_cell_width = (dimensions.cell_width.as_f32() * scale_factor).round() as i32;
-        let light_stroke =
-            ((nominal_cell_width.max(1) as f32 / LIGHT_STROKE_DIVISOR).round() as i32).max(1);
         if let Some(geometry) = rounded_geometry(self.glyph, cell, light_stroke, |stub| {
             paint_rect(stub, cell_left, cell_top, scale_factor, self.color, window);
         }) {
@@ -443,6 +449,7 @@ pub struct BoxDrawingPainter<'a> {
     origin: Point<Pixels>,
     dimensions: TerminalBounds,
     text_style: &'a TextStyle,
+    light_stroke: Option<i32>,
     decoration_metrics: Option<DecorationMetrics>,
 }
 
@@ -456,11 +463,28 @@ impl<'a> BoxDrawingPainter<'a> {
             origin,
             dimensions,
             text_style,
+            light_stroke: None,
             decoration_metrics: None,
         }
     }
 
     pub fn paint(&mut self, glyph: &BoxDrawingLayoutGlyph, window: &mut Window) {
+        let light_stroke = if let Some(light_stroke) = self.light_stroke {
+            light_stroke
+        } else {
+            let text_system = window.text_system();
+            let font_size = self.text_style.font_size.to_pixels(window.rem_size());
+            let font_id = text_system.resolve_font(&self.text_style.font());
+            let stroke_width = box_drawing_stroke_width(
+                text_system.underline_thickness(font_id, font_size),
+                self.dimensions.cell_width,
+            );
+            let light_stroke = (window.pixel_snap(stroke_width).as_f32() * window.scale_factor())
+                .round()
+                .max(1.) as i32;
+            self.light_stroke = Some(light_stroke);
+            light_stroke
+        };
         let decoration_metrics = if glyph.has_decorations() {
             if let Some(metrics) = self.decoration_metrics {
                 Some(metrics)
@@ -479,7 +503,13 @@ impl<'a> BoxDrawingPainter<'a> {
             None
         };
 
-        glyph.paint(self.origin, &self.dimensions, decoration_metrics, window);
+        glyph.paint(
+            self.origin,
+            &self.dimensions,
+            light_stroke,
+            decoration_metrics,
+            window,
+        );
     }
 }
 
@@ -512,6 +542,14 @@ mod tests {
             }
         }
         pixels
+    }
+
+    #[test]
+    fn box_drawing_stroke_uses_font_metric_with_cell_width_fallback() {
+        assert_eq!(box_drawing_stroke_width(px(0.8), px(16.)), px(0.8));
+        for invalid_metric in [px(0.), px(-1.), px(f32::NAN)] {
+            assert_eq!(box_drawing_stroke_width(invalid_metric, px(16.)), px(2.));
+        }
     }
 
     #[test]
