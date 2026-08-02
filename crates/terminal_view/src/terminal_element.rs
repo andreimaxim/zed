@@ -27,6 +27,8 @@ use workspace::Workspace;
 use std::mem;
 use std::{fmt::Debug, rc::Rc};
 
+pub use crate::box_drawing::BoxDrawingLayoutGlyph;
+use crate::box_drawing::glyph_for as box_drawing_glyph_for;
 use crate::{BlockContext, BlockProperties, ContentMode, TerminalMode, TerminalView};
 
 /// The information generated during layout that is necessary for painting.
@@ -34,6 +36,7 @@ pub struct LayoutState {
     hitbox: Hitbox,
     batched_text_runs: Vec<BatchedTextRun>,
     block_element_rects: Vec<BlockElementLayoutRect>,
+    box_drawing_glyphs: Vec<BoxDrawingLayoutGlyph>,
     rects: Vec<LayoutRect>,
     relative_highlighted_ranges: Vec<(Range, Hsla)>,
     cursor: Option<CursorLayout>,
@@ -446,6 +449,7 @@ impl TerminalElement {
         Vec<LayoutRect>,
         Vec<BatchedTextRun>,
         Vec<BlockElementLayoutRect>,
+        Vec<BoxDrawingLayoutGlyph>,
     ) {
         let start_time = Instant::now();
         let theme = cx.theme();
@@ -457,6 +461,7 @@ impl TerminalElement {
 
         let mut batched_runs = Vec::with_capacity(estimated_runs);
         let mut block_element_regions = Vec::new();
+        let mut box_drawing_glyphs = Vec::new();
         let mut cell_count = 0;
 
         // Collect background regions for efficient merging
@@ -531,6 +536,17 @@ impl TerminalElement {
                         );
 
                         let cell_point = LayoutPoint::new(display_line, point.column as i32);
+                        if let Some(glyph) = box_drawing_glyph_for(cell.character()) {
+                            box_drawing_glyphs.push(BoxDrawingLayoutGlyph::new(
+                                cell_point,
+                                glyph,
+                                cell_style.color,
+                            ));
+                            if let Some(batch) = current_batch.take() {
+                                batched_runs.push(batch);
+                            }
+                            continue;
+                        }
                         if Self::collect_block_element_regions(
                             cell_point,
                             cell.character(),
@@ -628,7 +644,7 @@ impl TerminalElement {
             layout_time
         );
 
-        (rects, batched_runs, block_element_rects)
+        (rects, batched_runs, block_element_rects, box_drawing_glyphs)
     }
 
     /// Computes the cursor position based on the cursor point and terminal dimensions.
@@ -1436,11 +1452,10 @@ impl Element for TerminalElement {
                 // This handles the case where the terminal has been scrolled past (above or
                 // below the viewport), similar to the editor fix in PR #45077 where start_row
                 // could exceed max_row when the editor was positioned above the viewport.
-                let (rects, batched_text_runs, block_element_rects) = if intersection.size.height
-                    <= px(0.)
+                let grid_layout = if intersection.size.height <= px(0.)
                     || intersection.size.width <= px(0.)
                 {
-                    (Vec::new(), Vec::new(), Vec::new())
+                    (Vec::new(), Vec::new(), Vec::new(), Vec::new())
                 } else if intersection == content_bounds {
                     // Fast path: terminal fully visible, no clipping needed.
                     // Avoid grouping/allocation overhead by streaming cells directly.
@@ -1486,6 +1501,8 @@ impl Element for TerminalElement {
                         cx,
                     )
                 };
+                let (rects, batched_text_runs, block_element_rects, box_drawing_glyphs) =
+                    grid_layout;
 
                 // Layout cursor. Rectangle is used for IME, so we should lay it out even
                 // if we don't end up showing it.
@@ -1584,6 +1601,7 @@ impl Element for TerminalElement {
                     hitbox,
                     batched_text_runs,
                     block_element_rects,
+                    box_drawing_glyphs,
                     cursor,
                     ime_cursor_bounds,
                     background_color,
@@ -1707,6 +1725,9 @@ impl Element for TerminalElement {
                     }
                     for block_element_rect in &layout.block_element_rects {
                         block_element_rect.paint(origin, &layout.dimensions, window);
+                    }
+                    for box_drawing_glyph in &layout.box_drawing_glyphs {
+                        box_drawing_glyph.paint(origin, &layout.dimensions, window);
                     }
                     let text_paint_time = text_paint_start.elapsed();
 

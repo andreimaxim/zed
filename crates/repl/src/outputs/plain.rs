@@ -362,7 +362,7 @@ impl Render for TerminalOutput {
 
         let text_style = text_style(window, cx);
         let minimum_contrast = TerminalSettings::get_global(cx).minimum_contrast;
-        let (rects, batched_text_runs, block_element_rects) =
+        let (rects, batched_text_runs, block_element_rects, box_drawing_glyphs) =
             terminal.read(cx).with_renderable_cells(|cells| {
                 TerminalElement::layout_grid(cells, 0, &text_style, None, minimum_contrast, cx)
             });
@@ -373,6 +373,7 @@ impl Render for TerminalOutput {
             .iter()
             .map(|b| b.start_point.line())
             .chain(block_element_rects.iter().map(|rect| rect.line()))
+            .chain(box_drawing_glyphs.iter().map(|glyph| glyph.line()))
             .max()
             .unwrap_or(0)
             + 1;
@@ -419,6 +420,18 @@ impl Render for TerminalOutput {
 
                 for block_element_rect in block_element_rects {
                     block_element_rect.paint(
+                        bounds.origin,
+                        &terminal::TerminalBounds {
+                            cell_width,
+                            line_height: text_line_height,
+                            bounds,
+                        },
+                        window,
+                    );
+                }
+
+                for box_drawing_glyph in box_drawing_glyphs {
+                    box_drawing_glyph.paint(
                         bounds.origin,
                         &terminal::TerminalBounds {
                             cell_width,
