@@ -1,6 +1,6 @@
 use gpui::{
-    Bounds, Hsla, PathBuilder, Pixels, Point, Size, StrikethroughStyle, TextRun, UnderlineStyle,
-    Window, fill, point, px,
+    Bounds, Hsla, PathBuilder, Pixels, Point, Size, StrikethroughStyle, TextRun, TextStyle,
+    UnderlineStyle, Window, fill, point, px,
 };
 use terminal::TerminalBounds;
 use util::ResultExt;
@@ -313,7 +313,8 @@ pub struct BoxDrawingLayoutGlyph {
 }
 
 impl BoxDrawingLayoutGlyph {
-    pub(crate) fn new(point: LayoutPoint, glyph: BoxDrawingGlyph, style: &TextRun) -> Self {
+    pub(crate) fn new(point: LayoutPoint, ch: char, style: &TextRun) -> Option<Self> {
+        let glyph = glyph_for(ch)?;
         let underline = style.underline.map(|mut underline| {
             underline.color = Some(underline.color.unwrap_or(style.color));
             underline
@@ -322,25 +323,28 @@ impl BoxDrawingLayoutGlyph {
             strikethrough.color = Some(strikethrough.color.unwrap_or(style.color));
             strikethrough
         });
-        Self {
+        Some(Self {
             point,
             glyph,
             color: style.color,
             underline,
             strikethrough,
-        }
+        })
     }
 
     pub fn line(&self) -> i32 {
         self.point.line()
     }
 
-    pub fn paint(
+    fn has_decorations(&self) -> bool {
+        self.underline.is_some() || self.strikethrough.is_some()
+    }
+
+    fn paint(
         &self,
         origin: Point<Pixels>,
         dimensions: &TerminalBounds,
-        font_ascent: Pixels,
-        font_descent: Pixels,
+        decoration_metrics: Option<DecorationMetrics>,
         window: &mut Window,
     ) {
         let scale_factor = window.scale_factor();
@@ -395,6 +399,11 @@ impl BoxDrawingLayoutGlyph {
             });
         }
 
+        let Some(decoration_metrics) = decoration_metrics else {
+            return;
+        };
+        let font_ascent = decoration_metrics.font_ascent;
+        let font_descent = decoration_metrics.font_descent;
         let cell_origin_y = origin.y + self.point.line() as f32 * dimensions.line_height;
         // Match GPUI's shaped-line placement so decorations align with adjacent text cells.
         let padding_top = (dimensions.line_height - font_ascent - font_descent) / 2.;
@@ -421,6 +430,56 @@ impl BoxDrawingLayoutGlyph {
                 strikethrough,
             );
         }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct DecorationMetrics {
+    font_ascent: Pixels,
+    font_descent: Pixels,
+}
+
+pub struct BoxDrawingPainter<'a> {
+    origin: Point<Pixels>,
+    dimensions: TerminalBounds,
+    text_style: &'a TextStyle,
+    decoration_metrics: Option<DecorationMetrics>,
+}
+
+impl<'a> BoxDrawingPainter<'a> {
+    pub fn new(
+        origin: Point<Pixels>,
+        dimensions: TerminalBounds,
+        text_style: &'a TextStyle,
+    ) -> Self {
+        Self {
+            origin,
+            dimensions,
+            text_style,
+            decoration_metrics: None,
+        }
+    }
+
+    pub fn paint(&mut self, glyph: &BoxDrawingLayoutGlyph, window: &mut Window) {
+        let decoration_metrics = if glyph.has_decorations() {
+            if let Some(metrics) = self.decoration_metrics {
+                Some(metrics)
+            } else {
+                let text_system = window.text_system();
+                let font_size = self.text_style.font_size.to_pixels(window.rem_size());
+                let font_id = text_system.resolve_font(&self.text_style.font());
+                let metrics = DecorationMetrics {
+                    font_ascent: text_system.ascent(font_id, font_size),
+                    font_descent: text_system.descent(font_id, font_size),
+                };
+                self.decoration_metrics = Some(metrics);
+                Some(metrics)
+            }
+        } else {
+            None
+        };
+
+        glyph.paint(self.origin, &self.dimensions, decoration_metrics, window);
     }
 }
 
@@ -526,11 +585,10 @@ mod tests {
             ..Default::default()
         };
 
-        let layout_glyph = BoxDrawingLayoutGlyph::new(
-            LayoutPoint::default(),
-            glyph_for('─').expect("light horizontal glyph"),
-            &style,
-        );
+        let Some(layout_glyph) = BoxDrawingLayoutGlyph::new(LayoutPoint::default(), '─', &style)
+        else {
+            panic!("light horizontal glyph should be custom-painted");
+        };
 
         assert_eq!(layout_glyph.color, color);
         assert_eq!(

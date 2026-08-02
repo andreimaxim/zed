@@ -20,7 +20,8 @@ use language::Buffer;
 use settings::Settings as _;
 use terminal::{Terminal, TerminalBuilder, terminal_settings::TerminalSettings};
 use terminal_view::terminal_element::{
-    BatchedTextRun, BlockElementLayoutRect, BoxDrawingLayoutGlyph, TerminalElement,
+    BatchedTextRun, BlockElementLayoutRect, BoxDrawingLayoutGlyph, BoxDrawingPainter,
+    TerminalElement,
 };
 use theme_settings::ThemeSettings;
 use ui::{IntoElement, prelude::*};
@@ -424,8 +425,6 @@ impl Render for TerminalOutput {
         let text_system = window.text_system();
         let font_pixels = text_style.font_size.to_pixels(window.rem_size());
         let font_id = text_system.resolve_font(&text_style.font());
-        let font_ascent = text_system.ascent(font_id, font_pixels);
-        let font_descent = text_system.descent(font_id, font_pixels);
 
         let cell_width = text_system
             .advance(font_id, font_pixels, 'w')
@@ -437,55 +436,27 @@ impl Render for TerminalOutput {
             move |_bounds, _, _| {},
             // paint
             move |bounds, _, window, cx| {
+                let dimensions = terminal::TerminalBounds {
+                    cell_width,
+                    line_height: text_line_height,
+                    bounds,
+                };
                 for rect in rects {
-                    rect.paint(
-                        bounds.origin,
-                        &terminal::TerminalBounds {
-                            cell_width,
-                            line_height: text_line_height,
-                            bounds,
-                        },
-                        window,
-                    );
+                    rect.paint(bounds.origin, &dimensions, window);
                 }
 
                 for batch in batched_text_runs {
-                    batch.paint(
-                        bounds.origin,
-                        &terminal::TerminalBounds {
-                            cell_width,
-                            line_height: text_line_height,
-                            bounds,
-                        },
-                        window,
-                        cx,
-                    );
+                    batch.paint(bounds.origin, &dimensions, window, cx);
                 }
 
                 for block_element_rect in block_element_rects {
-                    block_element_rect.paint(
-                        bounds.origin,
-                        &terminal::TerminalBounds {
-                            cell_width,
-                            line_height: text_line_height,
-                            bounds,
-                        },
-                        window,
-                    );
+                    block_element_rect.paint(bounds.origin, &dimensions, window);
                 }
 
+                let mut box_drawing_painter =
+                    BoxDrawingPainter::new(bounds.origin, dimensions, &text_style);
                 for box_drawing_glyph in box_drawing_glyphs {
-                    box_drawing_glyph.paint(
-                        bounds.origin,
-                        &terminal::TerminalBounds {
-                            cell_width,
-                            line_height: text_line_height,
-                            bounds,
-                        },
-                        font_ascent,
-                        font_descent,
-                        window,
-                    );
+                    box_drawing_painter.paint(&box_drawing_glyph, window);
                 }
             },
         )

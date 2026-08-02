@@ -27,8 +27,7 @@ use workspace::Workspace;
 use std::mem;
 use std::{fmt::Debug, rc::Rc};
 
-pub use crate::box_drawing::BoxDrawingLayoutGlyph;
-use crate::box_drawing::glyph_for as box_drawing_glyph_for;
+pub use crate::box_drawing::{BoxDrawingLayoutGlyph, BoxDrawingPainter};
 use crate::{BlockContext, BlockProperties, ContentMode, TerminalMode, TerminalView};
 
 /// The information generated during layout that is necessary for painting.
@@ -537,12 +536,10 @@ impl TerminalElement {
                         );
 
                         let cell_point = LayoutPoint::new(display_line, point.column as i32);
-                        if let Some(glyph) = box_drawing_glyph_for(cell.character()) {
-                            box_drawing_glyphs.push(BoxDrawingLayoutGlyph::new(
-                                cell_point,
-                                glyph,
-                                &cell_style,
-                            ));
+                        if let Some(glyph) =
+                            BoxDrawingLayoutGlyph::new(cell_point, cell.character(), &cell_style)
+                        {
+                            box_drawing_glyphs.push(glyph);
                             if let Some(batch) = current_batch.take() {
                                 batched_runs.push(batch);
                             }
@@ -1510,18 +1507,16 @@ impl Element for TerminalElement {
                 let cursor_point = DisplayCursor::from(cursor.point, display_offset);
                 let cursor_box_drawing_glyph =
                     if self.focused && matches!(cursor.shape, CursorShape::Block) {
-                        box_drawing_glyph_for(*cursor_char).map(|glyph| {
-                            let cursor_style = TextRun {
-                                len: cursor_char.len_utf8(),
-                                color: theme.colors().terminal_ansi_background,
-                                ..Default::default()
-                            };
-                            BoxDrawingLayoutGlyph::new(
-                                LayoutPoint::new(cursor_point.line(), cursor_point.col() as i32),
-                                glyph,
-                                &cursor_style,
-                            )
-                        })
+                        let cursor_style = TextRun {
+                            len: cursor_char.len_utf8(),
+                            color: theme.colors().terminal_ansi_background,
+                            ..Default::default()
+                        };
+                        BoxDrawingLayoutGlyph::new(
+                            LayoutPoint::new(cursor_point.line(), cursor_point.col() as i32),
+                            *cursor_char,
+                            &cursor_style,
+                        )
                     } else {
                         None
                     };
@@ -1751,29 +1746,10 @@ impl Element for TerminalElement {
                     for block_element_rect in &layout.block_element_rects {
                         block_element_rect.paint(origin, &layout.dimensions, window);
                     }
-                    let has_box_drawing_glyphs =
-                        !layout.box_drawing_glyphs.is_empty() || cursor_box_drawing_glyph.is_some();
-                    let (font_ascent, font_descent) = if has_box_drawing_glyphs {
-                        let text_system = window.text_system();
-                        let font_size = layout
-                            .base_text_style
-                            .font_size
-                            .to_pixels(window.rem_size());
-                        let font_id = text_system.resolve_font(&layout.base_text_style.font());
-                        let font_ascent = text_system.ascent(font_id, font_size);
-                        let font_descent = text_system.descent(font_id, font_size);
-                        (font_ascent, font_descent)
-                    } else {
-                        (Pixels::ZERO, Pixels::ZERO)
-                    };
+                    let mut box_drawing_painter =
+                        BoxDrawingPainter::new(origin, layout.dimensions, &layout.base_text_style);
                     for box_drawing_glyph in &layout.box_drawing_glyphs {
-                        box_drawing_glyph.paint(
-                            origin,
-                            &layout.dimensions,
-                            font_ascent,
-                            font_descent,
-                            window,
-                        );
+                        box_drawing_painter.paint(box_drawing_glyph, window);
                     }
                     let text_paint_time = text_paint_start.elapsed();
 
@@ -1827,13 +1803,7 @@ impl Element for TerminalElement {
                     {
                         cursor.paint(origin, window, cx);
                         if let Some(cursor_box_drawing_glyph) = &cursor_box_drawing_glyph {
-                            cursor_box_drawing_glyph.paint(
-                                origin,
-                                &layout.dimensions,
-                                font_ascent,
-                                font_descent,
-                                window,
-                            );
+                            box_drawing_painter.paint(cursor_box_drawing_glyph, window);
                         }
                     }
 
