@@ -1,4 +1,7 @@
-use gpui::{Bounds, Hsla, PathBuilder, Pixels, Point, Size, Window, fill, point, px};
+use gpui::{
+    Bounds, Hsla, PathBuilder, Pixels, Point, Size, StrikethroughStyle, TextRun, UnderlineStyle,
+    Window, fill, point, px,
+};
 use terminal::TerminalBounds;
 use util::ResultExt;
 
@@ -221,9 +224,6 @@ fn rounded_geometry(
         .min(cell.width as f32 - center.x)
         .min(center.y)
         .min(cell.height as f32 - center.y);
-    if radius <= 0. {
-        return None;
-    }
 
     let arc_start = point(
         if left {
@@ -308,14 +308,26 @@ pub struct BoxDrawingLayoutGlyph {
     point: LayoutPoint,
     glyph: BoxDrawingGlyph,
     color: Hsla,
+    underline: Option<UnderlineStyle>,
+    strikethrough: Option<StrikethroughStyle>,
 }
 
 impl BoxDrawingLayoutGlyph {
-    pub(crate) fn new(point: LayoutPoint, glyph: BoxDrawingGlyph, color: Hsla) -> Self {
+    pub(crate) fn new(point: LayoutPoint, glyph: BoxDrawingGlyph, style: &TextRun) -> Self {
+        let underline = style.underline.map(|mut underline| {
+            underline.color = Some(underline.color.unwrap_or(style.color));
+            underline
+        });
+        let strikethrough = style.strikethrough.map(|mut strikethrough| {
+            strikethrough.color = Some(strikethrough.color.unwrap_or(style.color));
+            strikethrough
+        });
         Self {
             point,
             glyph,
-            color,
+            color: style.color,
+            underline,
+            strikethrough,
         }
     }
 
@@ -323,7 +335,14 @@ impl BoxDrawingLayoutGlyph {
         self.point.line()
     }
 
-    pub fn paint(&self, origin: Point<Pixels>, dimensions: &TerminalBounds, window: &mut Window) {
+    pub fn paint(
+        &self,
+        origin: Point<Pixels>,
+        dimensions: &TerminalBounds,
+        font_ascent: Pixels,
+        font_descent: Pixels,
+        window: &mut Window,
+    ) {
         let scale_factor = window.scale_factor();
         let to_device_pixel =
             |value| (window.pixel_snap(value).as_f32() * scale_factor).round() as i32;
@@ -370,12 +389,38 @@ impl BoxDrawingLayoutGlyph {
             if let Some(path) = builder.build().log_err() {
                 window.paint_path(path, self.color);
             }
-            return;
+        } else {
+            for_each_straight_rect(self.glyph, cell, light_stroke, |rect| {
+                paint_rect(rect, cell_left, cell_top, scale_factor, self.color, window);
+            });
         }
 
-        for_each_straight_rect(self.glyph, cell, light_stroke, |rect| {
-            paint_rect(rect, cell_left, cell_top, scale_factor, self.color, window);
-        });
+        let cell_origin_y = origin.y + self.point.line() as f32 * dimensions.line_height;
+        // Match GPUI's shaped-line placement so decorations align with adjacent text cells.
+        let padding_top = (dimensions.line_height - font_ascent - font_descent) / 2.;
+        let baseline_offset = padding_top + font_ascent;
+        let decoration_origin_x = px(cell_left as f32 / scale_factor);
+        let decoration_width = px((cell_right - cell_left) as f32 / scale_factor);
+        if let Some(underline) = &self.underline {
+            window.paint_underline(
+                point(
+                    decoration_origin_x,
+                    cell_origin_y + baseline_offset + font_descent * 0.618,
+                ),
+                decoration_width,
+                underline,
+            );
+        }
+        if let Some(strikethrough) = &self.strikethrough {
+            window.paint_strikethrough(
+                point(
+                    decoration_origin_x,
+                    cell_origin_y + (font_ascent * 0.5 + baseline_offset) * 0.5,
+                ),
+                decoration_width,
+                strikethrough,
+            );
+        }
     }
 }
 
@@ -462,66 +507,131 @@ mod tests {
     }
 
     #[test]
-    fn straight_glyph_rects_are_connected_disjoint_and_contained() {
-        let cell = Size {
-            width: 10,
-            height: 24,
+    fn layout_glyph_preserves_text_decorations() {
+        let color = gpui::red();
+        let underline = UnderlineStyle {
+            color: None,
+            thickness: px(2.),
+            wavy: true,
         };
-        for codepoint in (0x2500..=0x2503)
-            .chain(0x250c..=0x254b)
-            .chain(0x2574..=0x257f)
-        {
-            let ch = char::from_u32(codepoint).expect("valid box drawing codepoint");
-            let glyph = glyph_for(ch)
-                .unwrap_or_else(|| panic!("U+{codepoint:04X} {ch} should be custom-painted"));
-            let pixels = rasterize(&straight_rects(glyph, cell, 1), cell);
+        let strikethrough = StrikethroughStyle {
+            color: Some(gpui::blue()),
+            thickness: px(3.),
+        };
+        let style = TextRun {
+            len: '─'.len_utf8(),
+            color,
+            underline: Some(underline),
+            strikethrough: Some(strikethrough),
+            ..Default::default()
+        };
 
-            if glyph.left.is_some() {
-                assert!(pixels.iter().any(|line| line[0]), "left arm for {ch}");
-            }
-            if glyph.right.is_some() {
-                assert!(pixels.iter().any(|line| line[9]), "right arm for {ch}");
-            }
-            if glyph.up.is_some() {
-                assert!(pixels[0].iter().any(|pixel| *pixel), "up arm for {ch}");
-            }
-            if glyph.down.is_some() {
-                assert!(pixels[23].iter().any(|pixel| *pixel), "down arm for {ch}");
-            }
+        let layout_glyph = BoxDrawingLayoutGlyph::new(
+            LayoutPoint::default(),
+            glyph_for('─').expect("light horizontal glyph"),
+            &style,
+        );
 
-            let start = pixels.iter().enumerate().find_map(|(line, columns)| {
-                columns
-                    .iter()
-                    .position(|pixel| *pixel)
-                    .map(|column| (line, column))
-            });
-            let Some(start) = start else {
-                panic!("U+{codepoint:04X} {ch} should paint at least one pixel");
-            };
-            let mut visited = vec![vec![false; cell.width as usize]; cell.height as usize];
-            let mut pending = vec![start];
-            while let Some((line, column)) = pending.pop() {
-                if visited[line][column] || !pixels[line][column] {
-                    continue;
-                }
-                visited[line][column] = true;
-                for (line_offset, column_offset) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
-                    let next_line = line as i32 + line_offset;
-                    let next_column = column as i32 + column_offset;
-                    if (0..cell.height).contains(&next_line)
-                        && (0..cell.width).contains(&next_column)
-                    {
-                        pending.push((next_line as usize, next_column as usize));
+        assert_eq!(layout_glyph.color, color);
+        assert_eq!(
+            layout_glyph.underline,
+            Some(UnderlineStyle {
+                color: Some(color),
+                ..underline
+            })
+        );
+        assert_eq!(layout_glyph.strikethrough, Some(strikethrough));
+    }
+
+    #[test]
+    fn straight_glyph_rects_are_connected_disjoint_and_contained() {
+        for cell in [
+            Size {
+                width: 9,
+                height: 23,
+            },
+            Size {
+                width: 10,
+                height: 24,
+            },
+            Size {
+                width: 11,
+                height: 25,
+            },
+            Size {
+                width: 2,
+                height: 3,
+            },
+        ] {
+            for light_stroke in 1..=3 {
+                for codepoint in (0x2500..=0x2503)
+                    .chain(0x250c..=0x254b)
+                    .chain(0x2574..=0x257f)
+                {
+                    let ch = char::from_u32(codepoint).expect("valid box drawing codepoint");
+                    let glyph = glyph_for(ch).unwrap_or_else(|| {
+                        panic!("U+{codepoint:04X} {ch} should be custom-painted")
+                    });
+                    let pixels = rasterize(&straight_rects(glyph, cell, light_stroke), cell);
+                    let case = format!(
+                        "{ch} in a {}x{} cell with light stroke {light_stroke}",
+                        cell.width, cell.height
+                    );
+
+                    if glyph.left.is_some() {
+                        assert!(pixels.iter().any(|line| line[0]), "left arm for {case}");
                     }
+                    if glyph.right.is_some() {
+                        assert!(
+                            pixels.iter().any(|line| line[cell.width as usize - 1]),
+                            "right arm for {case}"
+                        );
+                    }
+                    if glyph.up.is_some() {
+                        assert!(pixels[0].iter().any(|pixel| *pixel), "up arm for {case}");
+                    }
+                    if glyph.down.is_some() {
+                        assert!(
+                            pixels[cell.height as usize - 1].iter().any(|pixel| *pixel),
+                            "down arm for {case}"
+                        );
+                    }
+
+                    let start = pixels.iter().enumerate().find_map(|(line, columns)| {
+                        columns
+                            .iter()
+                            .position(|pixel| *pixel)
+                            .map(|column| (line, column))
+                    });
+                    let Some(start) = start else {
+                        panic!("{case} should paint at least one pixel");
+                    };
+                    let mut visited = vec![vec![false; cell.width as usize]; cell.height as usize];
+                    let mut pending = vec![start];
+                    while let Some((line, column)) = pending.pop() {
+                        if visited[line][column] || !pixels[line][column] {
+                            continue;
+                        }
+                        visited[line][column] = true;
+                        for (line_offset, column_offset) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
+                            let next_line = line as i32 + line_offset;
+                            let next_column = column as i32 + column_offset;
+                            if (0..cell.height).contains(&next_line)
+                                && (0..cell.width).contains(&next_column)
+                            {
+                                pending.push((next_line as usize, next_column as usize));
+                            }
+                        }
+                    }
+                    assert!(
+                        pixels.iter().enumerate().all(|(line, columns)| columns
+                            .iter()
+                            .enumerate()
+                            .all(|(column, pixel)| !pixel || visited[line][column])),
+                        "{case} should be one connected shape"
+                    );
                 }
             }
-            assert!(
-                pixels.iter().enumerate().all(|(line, columns)| columns
-                    .iter()
-                    .enumerate()
-                    .all(|(column, pixel)| !pixel || visited[line][column])),
-                "U+{codepoint:04X} {ch} should be one connected shape"
-            );
         }
     }
 

@@ -40,6 +40,7 @@ pub struct LayoutState {
     rects: Vec<LayoutRect>,
     relative_highlighted_ranges: Vec<(Range, Hsla)>,
     cursor: Option<CursorLayout>,
+    cursor_box_drawing_glyph: Option<BoxDrawingLayoutGlyph>,
     ime_cursor_bounds: Option<Bounds<Pixels>>,
     background_color: Hsla,
     dimensions: TerminalBounds,
@@ -540,7 +541,7 @@ impl TerminalElement {
                             box_drawing_glyphs.push(BoxDrawingLayoutGlyph::new(
                                 cell_point,
                                 glyph,
-                                cell_style.color,
+                                &cell_style,
                             ));
                             if let Some(batch) = current_batch.take() {
                                 batched_runs.push(batch);
@@ -1507,7 +1508,25 @@ impl Element for TerminalElement {
                 // Layout cursor. Rectangle is used for IME, so we should lay it out even
                 // if we don't end up showing it.
                 let cursor_point = DisplayCursor::from(cursor.point, display_offset);
-                let cursor_text = {
+                let cursor_box_drawing_glyph =
+                    if self.focused && matches!(cursor.shape, CursorShape::Block) {
+                        box_drawing_glyph_for(*cursor_char).map(|glyph| {
+                            let cursor_style = TextRun {
+                                len: cursor_char.len_utf8(),
+                                color: theme.colors().terminal_ansi_background,
+                                ..Default::default()
+                            };
+                            BoxDrawingLayoutGlyph::new(
+                                LayoutPoint::new(cursor_point.line(), cursor_point.col() as i32),
+                                glyph,
+                                &cursor_style,
+                            )
+                        })
+                    } else {
+                        None
+                    };
+                let cursor_uses_box_drawing = cursor_box_drawing_glyph.is_some();
+                let cursor_text = (!cursor_uses_box_drawing).then(|| {
                     let str_trxt = cursor_char.to_string();
                     let len = str_trxt.len();
                     window.text_system().shape_line(
@@ -1521,15 +1540,19 @@ impl Element for TerminalElement {
                         }],
                         None,
                     )
-                };
+                });
 
                 // For whitespace, use cell width to avoid cursor stretching.
                 // For other characters, use the larger of shaped width and cell width
                 // to properly cover wide characters like emojis.
-                let cursor_width = if cursor_char.is_whitespace() {
+                let cursor_width = if cursor_uses_box_drawing || cursor_char.is_whitespace() {
                     dimensions.cell_width()
                 } else {
-                    cursor_text.width.max(dimensions.cell_width())
+                    cursor_text
+                        .as_ref()
+                        .map_or(dimensions.cell_width(), |text| {
+                            text.width.max(dimensions.cell_width())
+                        })
                 };
 
                 let ime_cursor_bounds = TerminalElement::cursor_position(cursor_point, dimensions)
@@ -1545,7 +1568,7 @@ impl Element for TerminalElement {
                     ime_cursor_bounds.map(move |bounds| {
                         let (shape, text) = match cursor.shape {
                             CursorShape::Block if !focused => (EditorCursorShape::Hollow, None),
-                            CursorShape::Block => (EditorCursorShape::Block, Some(cursor_text)),
+                            CursorShape::Block => (EditorCursorShape::Block, cursor_text),
                             CursorShape::Underline if !focused => (EditorCursorShape::Hollow, None),
                             CursorShape::Underline => (EditorCursorShape::Underline, None),
                             CursorShape::Bar if !focused => (EditorCursorShape::Hollow, None),
@@ -1603,6 +1626,7 @@ impl Element for TerminalElement {
                     block_element_rects,
                     box_drawing_glyphs,
                     cursor,
+                    cursor_box_drawing_glyph,
                     ime_cursor_bounds,
                     background_color,
                     dimensions,
@@ -1668,6 +1692,7 @@ impl Element for TerminalElement {
             }
 
             let original_cursor = layout.cursor.take();
+            let cursor_box_drawing_glyph = layout.cursor_box_drawing_glyph.take();
             let hyperlink_tooltip = layout.hyperlink_tooltip.take();
             let block_below_cursor_element = layout.block_below_cursor_element.take();
             self.interactivity.paint(
@@ -1726,8 +1751,29 @@ impl Element for TerminalElement {
                     for block_element_rect in &layout.block_element_rects {
                         block_element_rect.paint(origin, &layout.dimensions, window);
                     }
+                    let has_box_drawing_glyphs =
+                        !layout.box_drawing_glyphs.is_empty() || cursor_box_drawing_glyph.is_some();
+                    let (font_ascent, font_descent) = if has_box_drawing_glyphs {
+                        let text_system = window.text_system();
+                        let font_size = layout
+                            .base_text_style
+                            .font_size
+                            .to_pixels(window.rem_size());
+                        let font_id = text_system.resolve_font(&layout.base_text_style.font());
+                        let font_ascent = text_system.ascent(font_id, font_size);
+                        let font_descent = text_system.descent(font_id, font_size);
+                        (font_ascent, font_descent)
+                    } else {
+                        (Pixels::ZERO, Pixels::ZERO)
+                    };
                     for box_drawing_glyph in &layout.box_drawing_glyphs {
-                        box_drawing_glyph.paint(origin, &layout.dimensions, window);
+                        box_drawing_glyph.paint(
+                            origin,
+                            &layout.dimensions,
+                            font_ascent,
+                            font_descent,
+                            window,
+                        );
                     }
                     let text_paint_time = text_paint_start.elapsed();
 
@@ -1780,6 +1826,15 @@ impl Element for TerminalElement {
                         && let Some(mut cursor) = original_cursor
                     {
                         cursor.paint(origin, window, cx);
+                        if let Some(cursor_box_drawing_glyph) = &cursor_box_drawing_glyph {
+                            cursor_box_drawing_glyph.paint(
+                                origin,
+                                &layout.dimensions,
+                                font_ascent,
+                                font_descent,
+                                window,
+                            );
+                        }
                     }
 
                     if let Some(mut element) = block_below_cursor_element {

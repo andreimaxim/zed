@@ -19,7 +19,9 @@ use gpui::{Bounds, ClipboardItem, Entity, FontStyle, Pixels, TextStyle, WhiteSpa
 use language::Buffer;
 use settings::Settings as _;
 use terminal::{Terminal, TerminalBuilder, terminal_settings::TerminalSettings};
-use terminal_view::terminal_element::TerminalElement;
+use terminal_view::terminal_element::{
+    BatchedTextRun, BlockElementLayoutRect, BoxDrawingLayoutGlyph, TerminalElement,
+};
 use theme_settings::ThemeSettings;
 use ui::{IntoElement, prelude::*};
 use util::paths::PathStyle;
@@ -237,6 +239,21 @@ impl TerminalOutput {
     }
 }
 
+fn rendered_line_count(
+    batched_text_runs: &[BatchedTextRun],
+    block_element_rects: &[BlockElementLayoutRect],
+    box_drawing_glyphs: &[BoxDrawingLayoutGlyph],
+) -> i32 {
+    batched_text_runs
+        .iter()
+        .map(|batch| batch.start_point.line())
+        .chain(block_element_rects.iter().map(|rect| rect.line()))
+        .chain(box_drawing_glyphs.iter().map(|glyph| glyph.line()))
+        .max()
+        .unwrap_or(0)
+        + 1
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -349,6 +366,34 @@ mod tests {
 
         assert_eq!(text, expected);
     }
+
+    #[gpui::test]
+    fn test_box_only_output_height_includes_every_line(cx: &mut TestAppContext) {
+        let cx = init_test(cx);
+        let line_count = cx.update(|window, cx| {
+            let output = cx.new(|cx| TerminalOutput::from("│\r\n│\r\n│", window, cx));
+            let text_style = text_style(window, cx);
+            let minimum_contrast = TerminalSettings::get_global(cx).minimum_contrast;
+            let (_, batched_text_runs, block_element_rects, box_drawing_glyphs) = output
+                .read(cx)
+                .terminal
+                .read(cx)
+                .with_renderable_cells(|cells| {
+                    TerminalElement::layout_grid(cells, 0, &text_style, None, minimum_contrast, cx)
+                });
+
+            assert!(batched_text_runs.is_empty());
+            assert!(block_element_rects.is_empty());
+            assert_eq!(box_drawing_glyphs.len(), 3);
+            rendered_line_count(
+                &batched_text_runs,
+                &block_element_rects,
+                &box_drawing_glyphs,
+            )
+        });
+
+        assert_eq!(line_count, 3);
+    }
 }
 
 impl Render for TerminalOutput {
@@ -369,19 +414,18 @@ impl Render for TerminalOutput {
 
         // lines are 0-indexed, so we must add 1 to get the number of lines
         let text_line_height = text_style.line_height_in_pixels(window.rem_size());
-        let num_lines = batched_text_runs
-            .iter()
-            .map(|b| b.start_point.line())
-            .chain(block_element_rects.iter().map(|rect| rect.line()))
-            .chain(box_drawing_glyphs.iter().map(|glyph| glyph.line()))
-            .max()
-            .unwrap_or(0)
-            + 1;
+        let num_lines = rendered_line_count(
+            &batched_text_runs,
+            &block_element_rects,
+            &box_drawing_glyphs,
+        );
         let height = num_lines as f32 * text_line_height;
 
         let text_system = window.text_system();
         let font_pixels = text_style.font_size.to_pixels(window.rem_size());
         let font_id = text_system.resolve_font(&text_style.font());
+        let font_ascent = text_system.ascent(font_id, font_pixels);
+        let font_descent = text_system.descent(font_id, font_pixels);
 
         let cell_width = text_system
             .advance(font_id, font_pixels, 'w')
@@ -438,6 +482,8 @@ impl Render for TerminalOutput {
                             line_height: text_line_height,
                             bounds,
                         },
+                        font_ascent,
+                        font_descent,
                         window,
                     );
                 }
