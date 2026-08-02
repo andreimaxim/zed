@@ -16,7 +16,7 @@ enum Stroke {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) struct BoxDrawingGlyph {
+struct BoxDrawingGlyph {
     left: Option<Stroke>,
     right: Option<Stroke>,
     up: Option<Stroke>,
@@ -24,7 +24,7 @@ pub(crate) struct BoxDrawingGlyph {
     rounded: bool,
 }
 
-pub(crate) fn glyph_for(ch: char) -> Option<BoxDrawingGlyph> {
+fn glyph_for(ch: char) -> Option<BoxDrawingGlyph> {
     if !matches!(
         ch,
         '\u{2500}'..='\u{2503}'

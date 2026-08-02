@@ -40,7 +40,8 @@ Visually verify:
 - Horizontal strokes and mixed-weight junctions connect without gaps or blurry transitions.
 - Rounded arcs meet their straight stubs without a kink, gap, or visible change in weight.
 - Underline, undercurl, and strikethrough remain visible beneath or across procedural box cells.
-- Decorations have the same height, thickness, and color across regular text (`A`, `B`), procedural glyphs (`─`, `│`, `╭`, `╮`), and font-fallback glyphs (`┄`, `═`).
+- Underlines beneath procedural glyphs have the same vertical position as underlines beneath the adjacent regular text (`A`, `B`), without stepping at cell boundaries.
+- Decorations have the same thickness and color across regular text (`A`, `B`), procedural glyphs (`─`, `│`, `╭`, `╮`), and font-fallback glyphs (`┄`, `═`).
 - Wavy undercurls do not have a conspicuous phase jump at every procedural cell boundary.
 - Intersections between dim decorations and box strokes are not noticeably darker.
 
@@ -68,6 +69,7 @@ PY
 Visually verify:
 
 - While the blinking block cursor covers `│`, `╭`, and `┼`, each glyph retains the same shape, stroke weight, and connections in the cursor-visible and cursor-hidden phases; only its colors change.
+- In the cursor-visible phase, each procedural glyph remains visible in the terminal background color inside the solid cursor fill, confirming that it is repainted after the cursor.
 - The fallback-font glyphs `┄` and `═` continue to render normally beneath the block cursor.
 - While the command is running, focus another pane while keeping the terminal visible. The resulting hollow cursor does not recolor or replace the glyph beneath it.
 
