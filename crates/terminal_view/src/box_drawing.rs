@@ -1,7 +1,4 @@
-use gpui::{
-    Bounds, Hsla, PathBuilder, Pixels, Point, Size, StrikethroughStyle, TextRun, TextStyle,
-    UnderlineStyle, Window, fill, point, px,
-};
+use gpui::{Bounds, Hsla, PathBuilder, Pixels, Point, Size, TextStyle, Window, fill, point, px};
 use terminal::TerminalBounds;
 use util::ResultExt;
 
@@ -710,27 +707,15 @@ pub struct BoxDrawingLayoutGlyph {
     point: LayoutPoint,
     glyph: BoxDrawingGlyph,
     color: Hsla,
-    underline: Option<UnderlineStyle>,
-    strikethrough: Option<StrikethroughStyle>,
 }
 
 impl BoxDrawingLayoutGlyph {
-    pub(crate) fn new(point: LayoutPoint, ch: char, style: &TextRun) -> Option<Self> {
+    pub(crate) fn new(point: LayoutPoint, ch: char, color: Hsla) -> Option<Self> {
         let glyph = glyph_for(ch)?;
-        let underline = style.underline.map(|mut underline| {
-            underline.color = Some(underline.color.unwrap_or(style.color));
-            underline
-        });
-        let strikethrough = style.strikethrough.map(|mut strikethrough| {
-            strikethrough.color = Some(strikethrough.color.unwrap_or(style.color));
-            strikethrough
-        });
         Some(Self {
             point,
             glyph,
-            color: style.color,
-            underline,
-            strikethrough,
+            color,
         })
     }
 
@@ -738,16 +723,11 @@ impl BoxDrawingLayoutGlyph {
         self.point.line()
     }
 
-    fn has_decorations(&self) -> bool {
-        self.underline.is_some() || self.strikethrough.is_some()
-    }
-
     fn paint(
         &self,
         origin: Point<Pixels>,
         dimensions: &TerminalBounds,
         light_stroke: i32,
-        decoration_metrics: Option<DecorationMetrics>,
         window: &mut Window,
     ) {
         let scale_factor = window.scale_factor();
@@ -822,45 +802,7 @@ impl BoxDrawingLayoutGlyph {
                 window,
             ),
         }
-
-        let Some(decoration_metrics) = decoration_metrics else {
-            return;
-        };
-        let font_ascent = decoration_metrics.font_ascent;
-        let font_descent = decoration_metrics.font_descent;
-        let cell_origin_y = origin.y + self.point.line() as f32 * dimensions.line_height;
-        // Match GPUI's shaped-line placement so decorations align with adjacent text cells.
-        let padding_top = (dimensions.line_height - font_ascent - font_descent) / 2.;
-        let baseline_offset = padding_top + font_ascent;
-        let decoration_origin_x = px(cell_left as f32 / scale_factor);
-        let decoration_width = px((cell_right - cell_left) as f32 / scale_factor);
-        if let Some(underline) = &self.underline {
-            window.paint_underline(
-                point(
-                    decoration_origin_x,
-                    cell_origin_y + baseline_offset + font_descent * 0.618,
-                ),
-                decoration_width,
-                underline,
-            );
-        }
-        if let Some(strikethrough) = &self.strikethrough {
-            window.paint_strikethrough(
-                point(
-                    decoration_origin_x,
-                    cell_origin_y + (font_ascent * 0.5 + baseline_offset) * 0.5,
-                ),
-                decoration_width,
-                strikethrough,
-            );
-        }
     }
-}
-
-#[derive(Clone, Copy)]
-struct DecorationMetrics {
-    font_ascent: Pixels,
-    font_descent: Pixels,
 }
 
 pub struct BoxDrawingPainter<'a> {
@@ -868,7 +810,6 @@ pub struct BoxDrawingPainter<'a> {
     dimensions: TerminalBounds,
     text_style: &'a TextStyle,
     light_stroke: Option<i32>,
-    decoration_metrics: Option<DecorationMetrics>,
 }
 
 impl<'a> BoxDrawingPainter<'a> {
@@ -882,7 +823,6 @@ impl<'a> BoxDrawingPainter<'a> {
             dimensions,
             text_style,
             light_stroke: None,
-            decoration_metrics: None,
         }
     }
 
@@ -903,31 +843,7 @@ impl<'a> BoxDrawingPainter<'a> {
             self.light_stroke = Some(light_stroke);
             light_stroke
         };
-        let decoration_metrics = if glyph.has_decorations() {
-            if let Some(metrics) = self.decoration_metrics {
-                Some(metrics)
-            } else {
-                let text_system = window.text_system();
-                let font_size = self.text_style.font_size.to_pixels(window.rem_size());
-                let font_id = text_system.resolve_font(&self.text_style.font());
-                let metrics = DecorationMetrics {
-                    font_ascent: text_system.ascent(font_id, font_size),
-                    font_descent: text_system.descent(font_id, font_size),
-                };
-                self.decoration_metrics = Some(metrics);
-                Some(metrics)
-            }
-        } else {
-            None
-        };
-
-        glyph.paint(
-            self.origin,
-            &self.dimensions,
-            light_stroke,
-            decoration_metrics,
-            window,
-        );
+        glyph.paint(self.origin, &self.dimensions, light_stroke, window);
     }
 }
 
@@ -1181,39 +1097,14 @@ mod tests {
     }
 
     #[test]
-    fn layout_glyph_preserves_text_decorations() {
+    fn layout_glyph_preserves_color() {
         let color = gpui::red();
-        let underline = UnderlineStyle {
-            color: None,
-            thickness: px(2.),
-            wavy: true,
-        };
-        let strikethrough = StrikethroughStyle {
-            color: Some(gpui::blue()),
-            thickness: px(3.),
-        };
-        let style = TextRun {
-            len: '─'.len_utf8(),
-            color,
-            underline: Some(underline),
-            strikethrough: Some(strikethrough),
-            ..Default::default()
-        };
-
-        let Some(layout_glyph) = BoxDrawingLayoutGlyph::new(LayoutPoint::default(), '─', &style)
+        let Some(layout_glyph) = BoxDrawingLayoutGlyph::new(LayoutPoint::default(), '─', color)
         else {
             panic!("light horizontal glyph should be custom-painted");
         };
 
         assert_eq!(layout_glyph.color, color);
-        assert_eq!(
-            layout_glyph.underline,
-            Some(UnderlineStyle {
-                color: Some(color),
-                ..underline
-            })
-        );
-        assert_eq!(layout_glyph.strikethrough, Some(strikethrough));
     }
 
     #[test]

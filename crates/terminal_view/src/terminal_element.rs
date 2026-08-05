@@ -524,7 +524,7 @@ impl TerminalElement {
                 {
                     if !is_blank(cell) {
                         cell_count += 1;
-                        let cell_style = TerminalElement::cell_style(
+                        let mut cell_style = TerminalElement::cell_style(
                             point,
                             cell,
                             fg,
@@ -536,16 +536,14 @@ impl TerminalElement {
                         );
 
                         let cell_point = LayoutPoint::new(display_line, point.column as i32);
-                        if let Some(glyph) =
-                            BoxDrawingLayoutGlyph::new(cell_point, cell.character(), &cell_style)
-                        {
+                        let character = if let Some(glyph) = BoxDrawingLayoutGlyph::new(
+                            cell_point,
+                            cell.character(),
+                            cell_style.color,
+                        ) {
                             box_drawing_glyphs.push(glyph);
-                            if let Some(batch) = current_batch.take() {
-                                batched_runs.push(batch);
-                            }
-                            continue;
-                        }
-                        if Self::collect_block_element_regions(
+                            ' '
+                        } else if Self::collect_block_element_regions(
                             cell_point,
                             cell.character(),
                             cell_style.color,
@@ -555,7 +553,10 @@ impl TerminalElement {
                                 batched_runs.push(batch);
                             }
                             continue;
-                        }
+                        } else {
+                            cell.character()
+                        };
+                        cell_style.len = character.len_utf8();
 
                         let zero_width_chars = cell.zerowidth();
 
@@ -566,7 +567,7 @@ impl TerminalElement {
                                 && batch.start_point.column + batch.cell_count as i32
                                     == cell_point.column
                             {
-                                batch.append_char(cell.character());
+                                batch.append_char(character);
                                 if let Some(chars) = zero_width_chars {
                                     batch.append_zero_width_chars(chars);
                                 }
@@ -576,7 +577,7 @@ impl TerminalElement {
                                 batched_runs.push(old_batch);
                                 let mut new_batch = BatchedTextRun::new_from_char(
                                     cell_point,
-                                    cell.character(),
+                                    character,
                                     cell_style,
                                     text_style.font_size,
                                 );
@@ -589,7 +590,7 @@ impl TerminalElement {
                             // Start new batch
                             let mut new_batch = BatchedTextRun::new_from_char(
                                 cell_point,
-                                cell.character(),
+                                character,
                                 cell_style,
                                 text_style.font_size,
                             );
@@ -1507,15 +1508,10 @@ impl Element for TerminalElement {
                 let cursor_point = DisplayCursor::from(cursor.point, display_offset);
                 let cursor_box_drawing_glyph =
                     if self.focused && matches!(cursor.shape, CursorShape::Block) {
-                        let cursor_style = TextRun {
-                            len: cursor_char.len_utf8(),
-                            color: theme.colors().terminal_ansi_background,
-                            ..Default::default()
-                        };
                         BoxDrawingLayoutGlyph::new(
                             LayoutPoint::new(cursor_point.line(), cursor_point.col() as i32),
                             *cursor_char,
-                            &cursor_style,
+                            theme.colors().terminal_ansi_background,
                         )
                     } else {
                         None
@@ -1738,18 +1734,18 @@ impl Element for TerminalElement {
                         }
                     }
 
-                    // Paint batched text runs instead of individual cells
                     let text_paint_start = Instant::now();
+                    let mut box_drawing_painter =
+                        BoxDrawingPainter::new(origin, layout.dimensions, &layout.base_text_style);
+                    for box_drawing_glyph in &layout.box_drawing_glyphs {
+                        box_drawing_painter.paint(box_drawing_glyph, window);
+                    }
+                    // Paint batched text runs after box drawing glyphs so text decorations are on top.
                     for batch in &layout.batched_text_runs {
                         batch.paint(origin, &layout.dimensions, window, cx);
                     }
                     for block_element_rect in &layout.block_element_rects {
                         block_element_rect.paint(origin, &layout.dimensions, window);
-                    }
-                    let mut box_drawing_painter =
-                        BoxDrawingPainter::new(origin, layout.dimensions, &layout.base_text_style);
-                    for box_drawing_glyph in &layout.box_drawing_glyphs {
-                        box_drawing_painter.paint(box_drawing_glyph, window);
                     }
                     let text_paint_time = text_paint_start.elapsed();
 

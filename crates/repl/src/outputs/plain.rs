@@ -369,7 +369,9 @@ mod tests {
     }
 
     #[gpui::test]
-    fn test_box_only_output_height_includes_every_line(cx: &mut TestAppContext) {
+    fn test_box_only_output_uses_placeholder_batches_and_includes_every_line(
+        cx: &mut TestAppContext,
+    ) {
         let cx = init_test(cx);
         let line_count = cx.update(|window, cx| {
             let output = cx.new(|cx| TerminalOutput::from("│\r\n│\r\n│", window, cx));
@@ -383,7 +385,12 @@ mod tests {
                     TerminalElement::layout_grid(cells, 0, &text_style, None, minimum_contrast, cx)
                 });
 
-            assert!(batched_text_runs.is_empty());
+            assert_eq!(batched_text_runs.len(), 3);
+            assert!(
+                batched_text_runs
+                    .iter()
+                    .all(|batch| batch.text == " " && batch.cell_count == 1)
+            );
             assert!(block_element_rects.is_empty());
             assert_eq!(box_drawing_glyphs.len(), 3);
             rendered_line_count(
@@ -394,6 +401,35 @@ mod tests {
         });
 
         assert_eq!(line_count, 3);
+    }
+
+    #[gpui::test]
+    fn test_box_drawing_placeholder_preserves_batch_decorations_and_zero_width_chars(
+        cx: &mut TestAppContext,
+    ) {
+        let cx = init_test(cx);
+        cx.update(|window, cx| {
+            let combining = '\u{0301}';
+            let input = format!("\x1b[4ma─{combining}b\x1b[0m");
+            let output = cx.new(|cx| TerminalOutput::from(&input, window, cx));
+            let text_style = text_style(window, cx);
+            let minimum_contrast = TerminalSettings::get_global(cx).minimum_contrast;
+            let (_, batched_text_runs, block_element_rects, box_drawing_glyphs) = output
+                .read(cx)
+                .terminal
+                .read(cx)
+                .with_renderable_cells(|cells| {
+                    TerminalElement::layout_grid(cells, 0, &text_style, None, minimum_contrast, cx)
+                });
+
+            assert!(block_element_rects.is_empty());
+            assert_eq!(box_drawing_glyphs.len(), 1);
+            assert_eq!(batched_text_runs.len(), 1);
+            let batch = &batched_text_runs[0];
+            assert_eq!(batch.text, format!("a {combining}b"));
+            assert_eq!(batch.cell_count, 3);
+            assert!(batch.style.underline.is_some());
+        });
     }
 }
 
@@ -445,18 +481,18 @@ impl Render for TerminalOutput {
                     rect.paint(bounds.origin, &dimensions, window);
                 }
 
+                let mut box_drawing_painter =
+                    BoxDrawingPainter::new(bounds.origin, dimensions, &text_style);
+                for box_drawing_glyph in box_drawing_glyphs {
+                    box_drawing_painter.paint(&box_drawing_glyph, window);
+                }
+
                 for batch in batched_text_runs {
                     batch.paint(bounds.origin, &dimensions, window, cx);
                 }
 
                 for block_element_rect in block_element_rects {
                     block_element_rect.paint(bounds.origin, &dimensions, window);
-                }
-
-                let mut box_drawing_painter =
-                    BoxDrawingPainter::new(bounds.origin, dimensions, &text_style);
-                for box_drawing_glyph in box_drawing_glyphs {
-                    box_drawing_painter.paint(&box_drawing_glyph, window);
                 }
             },
         )
